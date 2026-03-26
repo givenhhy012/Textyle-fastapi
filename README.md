@@ -47,7 +47,7 @@
   1) 초기 데이터 적재 (HuggingFace Streaming)
   : HuggingFace에서 데이터를 실시간으로 읽어와 벡터를 생성하고 DB에 저장. (이미지는 Base64로 저장되어 별도 서버가
   필요 없음.)
-   * python build_vector_db_streaming.py
+   * python ingest_data.py
      * 기본적으로 100~128건의 테스트 데이터를 적재하도록 설정되어 있음.
      * 적재가 완료되면 DB의 products와 product_images 테이블에서 데이터를 확인가능.
 
