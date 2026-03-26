@@ -1,0 +1,116 @@
+주요 테이블 그룹
+   1. 회원 및 인증 (User & Auth): 사용자 정보 및 취향 관리.
+   2. 상품 메타데이터 (Product Metadata): 의류의 기본 정보(브랜드, 가격, 카테고리).
+   3. 이미지 및 벡터 (Image & Vector): 512차원 벡터 데이터 및 이미지 경로.
+   4. 패션 속성 (Fashion Attributes): DeepFashion 특유의 속성(소매 길이, 무늬, 스타일) 관리.
+   5. 사용자 활동 (User Activity): 찜하기(북마크), 검색 히스토리(취향 분석용).
+
+  ---
+
+  2. 상세 테이블 설계 (DDL/Schema)
+
+   -- 1. pgvector 확장 활성화 (필수)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 2. 데이터 소스 구분 (DeepFashion vs Crawler)
+CREATE TYPE source_type AS ENUM ('DEEPFASHION', 'CRAWLER');
+
+-- 3. 카테고리 테이블 (계층 구조 지원)
+CREATE TABLE categories (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    parent_id INTEGER REFERENCES categories(id),
+    level INTEGER DEFAULT 1 -- 1: 대분류, 2: 중분류 등
+);
+
+-- 4. 상품 메타데이터 테이블 (DeepFashion과 실제 쇼핑몰 공용)
+CREATE TABLE products (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255),                -- 상품명 (DeepFashion은 식별번호나 임의명칭)
+    brand VARCHAR(100),               -- 브랜드명
+    price INTEGER,                    -- 가격 (쇼핑몰 전환 시 필수)
+    original_url TEXT,                -- 상품 원본 상세페이지 링크
+    category_id INTEGER REFERENCES categories(id),
+    source source_type NOT NULL,      -- 데이터 출처 구분
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. 상품 이미지 및 벡터 테이블 (검색의 핵심)
+CREATE TABLE product_images (
+    id BIGSERIAL PRIMARY KEY,
+    product_id BIGINT REFERENCES products(id) ON DELETE CASCADE,
+    image_url TEXT NOT NULL,          -- S3 또는 로컬 경로
+    is_main BOOLEAN DEFAULT FALSE,    -- 메인 썸네일 여부
+    embedding vector(512),            -- CLIP/CIR 기반 512차원 벡터 (pgvector)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 6. 패션 속성(Attribute) 마스터 테이블 (DeepFashion 기반)
+-- 예: 'Red', 'Striped', 'Long Sleeve', 'Cotton' 등
+CREATE TABLE attributes (
+    id SERIAL PRIMARY KEY,
+    attr_type VARCHAR(50),            -- 예: 'Color', 'Pattern', 'Fabric', 'Style'
+    attr_value VARCHAR(100) NOT NULL
+);
+
+-- 7. 상품-속성 매핑 테이블 (N:M 관계)
+CREATE TABLE product_attributes (
+    product_id BIGINT REFERENCES products(id) ON DELETE CASCADE,
+    attribute_id INTEGER REFERENCES attributes(id),
+    PRIMARY KEY (product_id, attribute_id)
+);
+
+-- 8. 사용자 테이블
+CREATE TABLE users (
+    id BIGSERIAL PRIMARY KEY,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    nickname VARCHAR(50),
+    user_vector vector(512),          -- 사용자 취향 벡터 (찜한 목록 기반 업데이트)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 9. 찜하기(북마크) 테이블
+CREATE TABLE bookmarks (
+    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    product_id BIGINT REFERENCES products(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, product_id)
+);
+
+-- 10. 검색 히스토리 테이블 (멀티모달 쿼리 저장)
+CREATE TABLE search_history (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(id),
+    query_text TEXT,
+    query_image_url TEXT,
+  ---
+
+  3. 인덱스 설계 (성능 최적화)
+
+  벡터 검색 속도를 위해 HNSW(Hierarchical Navigable Small World) 인덱스를 적용합니다. (데이터가 수만 건 이상일 때 필수)
+
+   1 -- 벡터 유사도 검색(코사인 유사도)을 위한 HNSW 인덱스 생성
+   2 CREATE INDEX ON product_images USING hnsw (embedding vector_cosine_ops)
+   3 WITH (m = 16, ef_construction = 64);
+   4
+   5 -- 일반 필터링 속도 향상을 위한 인덱스
+   6 CREATE INDEX idx_products_category ON products(category_id);
+   7 CREATE INDEX idx_products_source ON products(source);
+
+  ---
+
+  4. 이 설계의 핵심 포인트 (전략적 이점)
+
+   1. 데이터 소스 유연성:
+       * products 테이블의 source 컬럼을 통해 DeepFashion 데이터로 모델 성능을 먼저 검증하고, 나중에 크롤링 데이터를 넣어도 기존     
+         로직(Spring JPA 등)을 그대로 유지할 수 있습니다.
+   2. DeepFashion 속성 완벽 수용:
+       * DeepFashion은 수백 개의 속성(Attribute) 태그를 제공합니다. attributes 테이블 구조를 통해 "Red + Striped + Casual" 같은 다중 
+         태그 필터링과 벡터 유사도 검색을 결합(Hybrid Search)할 수 있습니다.
+   3. 초개인화 확장성:
+       * users 테이블에 user_vector 컬럼을 두었습니다. 사용자가 '찜하기'를 누를 때마다 해당 상품의 벡터를 평균 내어 유저 벡터를      
+         업데이트하면, 다음 검색 시 "유저 취향에 더 가까운 결과"를 상단에 배치(Re-ranking)할 수 있습니다.
+   4. 이미지 중심 검색:
+       * 한 상품에 여러 장의 이미지가 있을 수 있으므로 벡터는 product_images 테이블에 저장합니다. 검색 시 가장 유사한 이미지를 찾고  
+         그에 연결된 상품 정보를 가져오는 흐름입니다.
