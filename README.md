@@ -67,7 +67,7 @@
   ---
 
   📁 주요 파일 설명
-   * build_vector_db_streaming.py: HuggingFace 데이터를 스트리밍하여 DB에 적재하는 스크립트.
+   * ingest_data.py: HuggingFace 데이터를 스트리밍하여 DB에 적재하는 스크립트.
    * main.py: FastAPI 기반 이미지 검색 API 서버.
    * database.txt: PostgreSQL 테이블 생성 및 인덱스 설정 DDL.
    * requirements.txt: 프로젝트 의존성 라이브러리 목록.
