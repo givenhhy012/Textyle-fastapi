@@ -1,11 +1,12 @@
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from pgvector.psycopg2 import register_vector
 from PIL import Image
 import io
 import torch
+import numpy as np
 from fashion_clip.fashion_clip import FashionCLIP
 import logging
 from contextlib import asynccontextmanager
@@ -26,6 +27,11 @@ MODEL_NAME = "fashion-clip"
 
 # --- 전역 변수 (모델) ---
 fclip = None
+
+# combined_emb = (alpha * img_emb) + (beta * txt_emb)
+alpha = 0.5
+beta = 0.5
+
 
 def patch_clip_model(model):
     """FashionCLIP library fix: 'BaseModelOutputWithPooling' object has no attribute 'detach'"""
@@ -128,6 +134,66 @@ async def search_image(file: UploadFile = File(...)):
 
     except Exception as e:
         logging.error(f"검색 중 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/search/composed")
+async def search_composed(text: str = Form(...), file: UploadFile = File(...)):
+    """이미지와 텍스트를 결합하여 유사한 상품 검색 (CIR)"""
+    if not fclip:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
+
+    try:
+        # 1. 이미지 및 텍스트 읽기
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        
+        # 2. 각각의 임베딩 생성
+        logging.info(f"결합 검색 시작: 텍스트='{text}'")
+        # FashionCLIP은 이미지와 텍스트를 동일한 512차원 공간으로 임베딩합니다.
+        img_emb = fclip.encode_images([image], batch_size=1)[0]
+        txt_emb = fclip.encode_text([text], batch_size=1)[0]
+        
+        # 3. 벡터 결합 (단순 합산 후 정규화)
+        # 이미지의 특징에 텍스트로 표현된 '수정 의도'를 더하는 방식입니다.
+        combined_emb = (alpha * img_emb) + (beta * txt_emb)
+        combined_emb = combined_emb / np.linalg.norm(combined_emb)
+        
+        # 4. DB 검색
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                query = """
+                    SELECT 
+                        p.id, 
+                        p.name, 
+                        pi.image_url, 
+                        1 - (pi.embedding <=> %s::vector) AS similarity
+                    FROM product_images pi
+                    JOIN products p ON pi.product_id = p.id
+                    ORDER BY pi.embedding <=> %s::vector
+                    LIMIT 5
+                """
+                cur.execute(query, (combined_emb.tolist(), combined_emb.tolist()))
+                results = cur.fetchall()
+                
+                search_results = []
+                for row in results:
+                    search_results.append({
+                        "product_id": row[0],
+                        "name": row[1],
+                        "image_url": row[2],
+                        "similarity": float(row[3])
+                    })
+                
+                return {
+                    "query_text": text,
+                    "results": search_results
+                }
+        finally:
+            conn.close()
+
+    except Exception as e:
+        logging.error(f"결합 검색 중 오류 발생: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
