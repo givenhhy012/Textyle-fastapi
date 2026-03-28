@@ -1,0 +1,110 @@
+-- ============================================================
+-- Textyle AI Server - Database Schema (AI팀 전용)
+-- PostgreSQL 16 + pgvector
+--
+-- [분리 이유]
+--   users, bookmarks, search_history는 Spring 백엔드팀 DB로 이관.
+--   AI팀 DB는 상품 메타데이터 및 벡터 연산에만 집중.
+--   Spring과의 연동은 product_id를 기준으로 API 호출로 처리.
+-- ============================================================
+
+
+-- 1. pgvector 확장 활성화 (필수)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+
+-- 2. 데이터 소스 구분 ENUM
+--    DEEPFASHION: 초기 데이터셋 (DeepFashion In-shop)
+--    CRAWLER: 추후 무신사 등 실제 쇼핑몰 크롤링 데이터
+CREATE TYPE source_type AS ENUM ('DEEPFASHION', 'CRAWLER');
+
+
+-- 3. 카테고리 테이블 (계층 구조 지원)
+--    level 1: 대분류 (예: 상의, 하의, 아우터)
+--    level 2: 중분류 (예: 니트, 데님, 코트)
+CREATE TABLE categories (
+    id        SERIAL  PRIMARY KEY,
+    name      VARCHAR(50)  NOT NULL,
+    parent_id INTEGER      REFERENCES categories(id),
+    level     INTEGER      NOT NULL DEFAULT 1
+);
+
+
+-- 4. 상품 메타데이터 테이블
+--    DeepFashion과 크롤링 데이터 공용 스키마.
+--    Spring팀과의 연동 키: id (product_id)
+--    brand, price, original_url은 크롤링 데이터 전환 시 채워짐.
+CREATE TABLE products (
+    id           BIGSERIAL   PRIMARY KEY,
+    name         VARCHAR(255),
+    brand        VARCHAR(100),
+    price        INTEGER,
+    original_url TEXT,
+    category_id  INTEGER     REFERENCES categories(id),
+    source       source_type NOT NULL,
+    created_at   TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+
+-- 5. 상품 이미지 및 벡터 테이블 (벡터 검색의 핵심)
+--    한 상품에 여러 이미지가 존재할 수 있으므로 별도 테이블로 분리.
+--    embedding: FashionCLIP 기반 512차원 벡터 (pgvector)
+--    image_url: 현재는 Base64 임시 저장, 추후 S3 URL로 전환 예정.
+CREATE TABLE product_images (
+    id         BIGSERIAL PRIMARY KEY,
+    product_id BIGINT    NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    image_url  TEXT      NOT NULL,
+    is_main    BOOLEAN   NOT NULL DEFAULT FALSE,
+    embedding  vector(512),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+
+-- 6. 패션 속성 마스터 테이블 (DeepFashion 속성 태그 기반)
+--    attr_type 예시: 'Color', 'Pattern', 'Fabric', 'Sleeve', 'Style', 'Fit'
+--    attr_value 예시: 'Red', 'Striped', 'Cotton', 'Long', 'Casual', 'Oversized'
+CREATE TABLE attributes (
+    id         SERIAL      PRIMARY KEY,
+    attr_type  VARCHAR(50) NOT NULL,
+    attr_value VARCHAR(100) NOT NULL,
+    UNIQUE (attr_type, attr_value)
+);
+
+
+-- 7. 상품-속성 매핑 테이블 (N:M)
+--    한 상품에 여러 속성을 태깅하기 위한 중간 테이블.
+--    벡터 검색 결과에 속성 필터(WHERE)를 결합하는 하이브리드 검색에 활용.
+CREATE TABLE product_attributes (
+    product_id   BIGINT  NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    attribute_id INTEGER NOT NULL REFERENCES attributes(id) ON DELETE CASCADE,
+    PRIMARY KEY (product_id, attribute_id)
+);
+
+
+-- ============================================================
+-- 인덱스 설계 (성능 최적화)
+-- ============================================================
+
+-- 벡터 유사도 검색(코사인)을 위한 HNSW 인덱스
+-- 데이터가 1만 건 이상일 때 효과 발생. 적재 완료 후 생성 권장.
+-- m=16, ef_construction=64: 정확도와 속도의 균형점 (기본값)
+CREATE INDEX idx_product_images_embedding
+    ON product_images
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- 카테고리 필터링 인덱스 (하이브리드 검색 WHERE 절 최적화)
+CREATE INDEX idx_products_category_id
+    ON products (category_id);
+
+-- 데이터 소스 필터링 인덱스
+CREATE INDEX idx_products_source
+    ON products (source);
+
+-- 메인 이미지 조회 최적화 (상품별 대표 이미지 빠른 조회)
+CREATE INDEX idx_product_images_product_main
+    ON product_images (product_id, is_main);
+
+-- 속성 타입별 조회 인덱스 (속성 마스터 목록 API 대비)
+CREATE INDEX idx_attributes_type
+    ON attributes (attr_type);
