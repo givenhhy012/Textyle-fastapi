@@ -37,7 +37,7 @@
 
   3) 데이터베이스 스키마 생성
    * DB 관리 도구(DBeaver, pgAdmin 등)를 통해 localhost:5433에 접속. (ID: postgres, PW: 1234)
-   * database.txt 파일에 있는 2. 상세 테이블 설계 (DDL/Schema) 쿼리문을 복사하여 실행.
+   * database_update.txt 파일에 있는 쿼리문을 복사하여 실행.
        * 주의: 최상단의 CREATE EXTENSION IF NOT EXISTS vector;가 반드시 실행되어야 함.
 
   ---
