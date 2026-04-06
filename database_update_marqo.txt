@@ -48,14 +48,14 @@ CREATE TABLE products (
 
 -- 5. 상품 이미지 및 벡터 테이블 (벡터 검색의 핵심)
 --    한 상품에 여러 이미지가 존재할 수 있으므로 별도 테이블로 분리.
---    embedding: FashionCLIP 기반 512차원 벡터 (pgvector)
+--    embedding: Marqo-FashionSigLIP 기반 768차원 벡터 (pgvector)
 --    image_url: 현재는 Base64 임시 저장, 추후 S3 URL로 전환 예정.
 CREATE TABLE product_images (
     id         BIGSERIAL PRIMARY KEY,
     product_id BIGINT    NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     image_url  TEXT      NOT NULL,
     is_main    BOOLEAN   NOT NULL DEFAULT FALSE,
-    embedding  vector(512),
+    embedding  vector(768),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

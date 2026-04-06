@@ -3,7 +3,8 @@ import sys
 import psycopg2
 from pgvector.psycopg2 import register_vector
 from PIL import Image
-from fashion_clip.fashion_clip import FashionCLIP
+import torch
+import open_clip
 import logging
 from datasets import load_dataset
 import base64
@@ -24,7 +25,7 @@ DB_PORT = "5433"
 DB_NAME = "postgres"
 DB_USER = "postgres"
 DB_PASSWORD = "1234"
-MODEL_NAME = "fashion-clip"
+MODEL_NAME = "hf-hub:Marqo/marqo-fashionSigLIP"
 
 # --- 데이터셋 설정 ---
 DATASET_PATH = "Marqo/deepfashion-inshop"
@@ -48,24 +49,21 @@ def get_db_connection():
 
 
 def load_model():
-    """FashionCLIP 모델을 로드합니다."""
-    fclip = FashionCLIP(MODEL_NAME)
+    """Marqo-FashionSigLIP 모델을 로드합니다."""
+    logging.info(f"'{MODEL_NAME}' 모델 로드 중...")
+    model, _, preprocess = open_clip.create_model_and_transforms(MODEL_NAME)
+    model.eval()
+    logging.info("모델 로드 완료.")
+    return model, preprocess
 
-    def patch_clip_model(model):
-        for attr_name in ["get_image_features", "get_text_features"]:
-            if hasattr(model, attr_name):
-                original_func = getattr(model, attr_name)
-                def wrapped_func(*args, _original_func=original_func, **kwargs):
-                    outputs = _original_func(*args, **kwargs)
-                    if hasattr(outputs, "pooler_output"):
-                        return outputs.pooler_output
-                    if isinstance(outputs, (list, tuple)) and len(outputs) > 1:
-                        return outputs[1]
-                    return outputs
-                setattr(model, attr_name, wrapped_func)
 
-    patch_clip_model(fclip.model)
-    return fclip
+def encode_images_batch(model, preprocess, pil_images: list) -> list:
+    """PIL 이미지 리스트를 배치로 768차원 벡터로 변환 후 정규화"""
+    image_tensors = torch.stack([preprocess(img) for img in pil_images])
+    with torch.no_grad():
+        features = model.encode_image(image_tensors)
+        features /= features.norm(dim=-1, keepdim=True)
+    return features.cpu().numpy()
 
 
 def get_or_create_category(cur, category_name, category_cache):
@@ -101,7 +99,7 @@ def get_or_create_category(cur, category_name, category_cache):
 
         parent_id = category_cache[parent_name]
 
-        # 소분류 캐시 키: "MEN-Denim" 형태 그대로 사용
+        # 소분류 삽입
         cur.execute(
             "INSERT INTO categories (name, parent_id, level) VALUES (%s, %s, 2) RETURNING id",
             (child_name, parent_id)
@@ -152,20 +150,18 @@ def save_batch_to_db(conn, metadata, embeddings):
             )
 
 
-def process_streaming(limit=100):
+def process_streaming(limit=1000):
     """HuggingFace 데이터셋을 스트리밍하여 DB에 적재"""
     conn = get_db_connection()
-    fclip = load_model()
+    model, preprocess = load_model()
 
     # 카테고리 인메모리 캐시: {category_name_string: db_id}
-    # save_batch_to_db에서 공유하기 위해 dict로 관리
     category_cache = {}
 
     try:
         # --- 기존 데이터 전체 삭제 및 ID 초기화 ---
         with conn.cursor() as cur:
             logging.info("기존 데이터를 삭제하고 ID를 초기화합니다...")
-            # 외래키 의존 순서: product_attributes → product_images → products → categories / attributes
             cur.execute("TRUNCATE TABLE product_attributes RESTART IDENTITY CASCADE;")
             cur.execute("TRUNCATE TABLE product_images    RESTART IDENTITY CASCADE;")
             cur.execute("TRUNCATE TABLE products          RESTART IDENTITY CASCADE;")
@@ -208,11 +204,11 @@ def process_streaming(limit=100):
                 "name": item_id,
                 "image_url": img_data_url,
                 "category_name": category_name,
-                "category_cache": category_cache,  # 배치 내 캐시 공유
+                "category_cache": category_cache,
             })
 
             if len(batch_images) == batch_size:
-                embeddings = fclip.encode_images(batch_images, batch_size=batch_size)
+                embeddings = encode_images_batch(model, preprocess, batch_images)
                 save_batch_to_db(conn, batch_metadata, embeddings)
                 conn.commit()
 
@@ -224,7 +220,7 @@ def process_streaming(limit=100):
 
         # 마지막 남은 배치 처리
         if batch_images:
-            embeddings = fclip.encode_images(batch_images, batch_size=len(batch_images))
+            embeddings = encode_images_batch(model, preprocess, batch_images)
             save_batch_to_db(conn, batch_metadata, embeddings)
             conn.commit()
             count += len(batch_images)
@@ -239,4 +235,4 @@ def process_streaming(limit=100):
 
 
 if __name__ == "__main__":
-    process_streaming(limit=100)
+    process_streaming(limit=1000)
